@@ -12,10 +12,29 @@
 -- anchor, if given, turns a heading's Markdown line ("## Some heading") into
 -- the anchor that links to it ("some-heading"); it's used to point links to
 -- sections of the copied page at those headings. The default is GitHub's.
+--
+-- yield, if given, is called often during the conversion, e.g. to yield a
+-- coroutine so that converting a large document doesn't block.
 
 -- markdownify needs lusoup's HTML5 parser, which upstream lusoup doesn't
 -- have yet, so a copy is bundled as markdownify.lusoup. Make lusoup's
 -- modules (which require each other as "lusoup.*") load from that copy.
+-- table.concat, in pieces: gopher-lua (micro's Lua) pushes every element
+-- onto its fixed-size registry, so concatenating more than a few thousand
+-- at once fails with "registry overflow".
+local function concat(t, sep)
+	sep = sep or ""
+	local n = #t
+	if n <= 1000 then
+		return table.concat(t, sep)
+	end
+	local chunks = {}
+	for i = 1, n, 1000 do
+		chunks[#chunks + 1] = table.concat(t, sep, i, math.min(i + 999, n))
+	end
+	return concat(chunks, sep)
+end
+
 for _, name in ipairs({ "init", "dom", "tokenizer", "treebuilder", "selector", "entities", "entity_table" }) do
 	local module = name == "init" and "lusoup" or ("lusoup." .. name)
 	local bundled = name == "init" and "markdownify.lusoup" or ("markdownify.lusoup." .. name)
@@ -63,6 +82,12 @@ end
 -- Escape what would start a block if it began a line: "# ", "> ", "- ",
 -- "+ ", "1. " and so on.
 local function escape_line_start(line)
+	-- only these can start a block; checking first saves pattern searches,
+	-- which are slow in some Lua implementations (micro's gopher-lua)
+	local b = line:byte(1)
+	if not (b == 35 or b == 62 or b == 45 or b == 43 or (b and b >= 48 and b <= 57)) then -- # > - + 0-9
+		return line
+	end
 	if line:find("^#+ ") or line:find("^#+$") or line:find("^>") or line:find("^[-+] ") or line:find("^[-+]$") then
 		return "\\" .. line
 	end
@@ -88,7 +113,7 @@ local function finish_paragraph(s)
 	while #lines > 0 and lines[1] == "" do
 		table.remove(lines, 1)
 	end
-	return table.concat(lines, "\\\n")
+	return concat(lines, "\\\n")
 end
 
 -- The raw text of a node, for code: whitespace kept, <br> as a newline.
@@ -102,7 +127,7 @@ local function raw_text(node)
 	for _, child in ipairs(node.children) do
 		parts[#parts + 1] = raw_text(child)
 	end
-	return table.concat(parts)
+	return concat(parts)
 end
 
 -- The shortest run of backticks that doesn't occur in s, with one more for a fence.
@@ -128,7 +153,10 @@ end
 
 -- What an element's inline style says about weight, slant and strike-through.
 local function style_hints(node)
-	local style = (node.attrs.style or ""):lower():gsub("%s", "")
+	if not node.attrs.style then
+		return nil, false, false
+	end
+	local style = node.attrs.style:lower():gsub("%s", "")
 	local weight = style:match("font%-weight:(%w+)")
 	local bold
 	if weight then
@@ -217,7 +245,7 @@ local function inline_children(node, opts)
 		end
 		parts[#parts + 1] = text
 	end
-	return table.concat(parts)
+	return concat(parts)
 end
 
 -- A heading's Markdown line ("## Text"), or "" if it has no text.
@@ -326,7 +354,7 @@ local function indent(block, first, rest)
 		local prefix = i == 1 and first or rest
 		out[#out + 1] = line == "" and prefix:gsub("%s+$", "") or prefix .. line
 	end
-	return table.concat(out, "\n")
+	return concat(out, "\n")
 end
 
 local function render_list(node, opts, ordered)
@@ -359,7 +387,7 @@ local function render_list(node, opts, ordered)
 			loose = true
 		end
 	end
-	return table.concat(items, loose and "\n\n" or "\n")
+	return concat(items, loose and "\n\n" or "\n")
 end
 
 local function table_rows(node, rows)
@@ -397,7 +425,7 @@ local function render_table(node, opts)
 		for i = 1, width do
 			padded[i] = cells[i] or ""
 		end
-		lines[#lines + 1] = "| " .. table.concat(padded, " | ") .. " |"
+		lines[#lines + 1] = "| " .. concat(padded, " | ") .. " |"
 	end
 	-- Markdown tables need a header row; use the first row
 	add(rows[1])
@@ -405,7 +433,7 @@ local function render_table(node, opts)
 	for i = 2, #rows do
 		add(rows[i])
 	end
-	return table.concat(lines, "\n")
+	return concat(lines, "\n")
 end
 
 local function code_language(node)
@@ -429,7 +457,7 @@ end
 render_blocks = function(node, opts)
 	local blocks, inline = {}, {}
 	local function flush()
-		local text = finish_paragraph(table.concat(inline))
+		local text = finish_paragraph(concat(inline))
 		if text ~= "" then
 			blocks[#blocks + 1] = text
 		end
@@ -442,6 +470,9 @@ render_blocks = function(node, opts)
 	end
 
 	for _, child in ipairs(node.children) do
+		if opts.yield then
+			opts.yield()
+		end
 		local tag = child.tag
 		if opts.footnotes.targets[child] then
 			-- rendered as a footnote instead
@@ -456,7 +487,7 @@ render_blocks = function(node, opts)
 				local fence = backticks_for(text, 3)
 				add(fence .. code_language(child) .. "\n" .. text .. "\n" .. fence)
 			elseif tag == "blockquote" then
-				local body = table.concat(render_blocks(child, opts), "\n\n")
+				local body = concat(render_blocks(child, opts), "\n\n")
 				if body ~= "" then
 					add(indent(body, "> ", "> "))
 				end
@@ -485,9 +516,27 @@ end
 -- ── Entry point ─────────────────────────────────────────────────────────────
 
 -- Browsers mark the copied part of clipboard HTML with these comments.
+-- The position of the first `<!--name-->` comment in html, and of its end.
+-- Looks for the name with a plain search first: a pattern search through a
+-- large document is slow in some Lua implementations (micro's gopher-lua).
+local function find_marker(html, name)
+	local init = 1
+	while true do
+		local at = html:find(name, init, true)
+		if not at then
+			return nil
+		end
+		local s, e = html:find("<!%-%-%s*" .. name .. "%s*%-%->", math.max(1, at - 16))
+		if s and s <= at then
+			return s, e
+		end
+		init = at + 1
+	end
+end
+
 local function clipboard_fragment(html)
-	local start = select(2, html:find("<!%-%-%s*StartFragment%s*%-%->"))
-	local stop = html:find("<!%-%-%s*EndFragment%s*%-%->")
+	local start = select(2, find_marker(html, "StartFragment"))
+	local stop = find_marker(html, "EndFragment")
 	if start and stop and stop > start then
 		return html:sub(start + 1, stop - 1)
 	end
@@ -620,7 +669,7 @@ local function render_footnotes(opts)
 		if note.target then
 			-- render the target itself, which is skipped where it was
 			opts.footnotes.targets[note.target] = nil
-			body = table.concat(render_blocks(note.target, opts), "\n\n")
+			body = concat(render_blocks(note.target, opts), "\n\n")
 			opts.footnotes.targets[note.target] = true
 		end
 		if not body or body == "" then
@@ -630,13 +679,13 @@ local function render_footnotes(opts)
 		end
 		defs[#defs + 1] = "[^" .. note.label .. "]: " .. body:gsub("\n(.)", "\n    %1")
 	end
-	return table.concat(defs, "\n")
+	return concat(defs, "\n")
 end
 
 function M.convert(html, opts)
 	opts = opts or {}
 	local lusoup = require("lusoup")
-	local document = lusoup.parse_document(clipboard_fragment(html))
+	local document = lusoup.parse_document(clipboard_fragment(html), { yield = opts.yield })
 	local body
 	for _, child in ipairs(document.children) do
 		if child.tag == "html" then
@@ -659,11 +708,14 @@ function M.convert(html, opts)
 	ctx.ids, links, sups = index_document(body)
 	ctx.page = find_page(opts.source, ctx.ids, links)
 	ctx.footnotes = find_footnotes(sups, ctx)
-	local md = table.concat(render_blocks(body, ctx), "\n\n")
+	local md = concat(render_blocks(body, ctx), "\n\n")
 	if #ctx.footnotes.order > 0 then
 		md = md .. "\n\n" .. render_footnotes(ctx)
 	end
-	return (md:gsub("\n\n\n+", "\n\n"))
+	if md:find("\n\n\n", 1, true) then
+		md = md:gsub("\n\n\n+", "\n\n")
+	end
+	return md
 end
 
 return M

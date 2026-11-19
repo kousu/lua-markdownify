@@ -69,6 +69,18 @@ footnote reference, labelled with the link's text (`[7]` → `[^7]`). If what
 it links to was copied, that is the footnote (and isn't repeated where it
 was); otherwise the footnote is the link, so it can still be followed.
 
+## Long documents
+
+Converting a large document takes a while. Pass a `yield` function, called
+often during the conversion, to run it in a coroutine without blocking:
+
+```lua
+local co = coroutine.create(function()
+    return markdownify.convert(html, { yield = coroutine.yield })
+end)
+-- resume `co` a slice at a time, e.g. from a timer, until it's dead
+```
+
 ## Testing
 
 ```bash
