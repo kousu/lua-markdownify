@@ -30,6 +30,45 @@ Some **bold** text and a [link](https://example.com).
 - inline code and code blocks, with the language from `class="language-x"`
 - line breaks
 
+Text that Markdown would read as formatting is escaped. When the HTML has
+the `<!--StartFragment-->`/`<!--EndFragment-->` markers browsers put on
+the clipboard, only the part between them is converted.
+
+## Images
+
+You can pass an `imageHandler(src, alt)` to do something special with their
+links. It's called for each image, and should return the src to link to instead,
+or `nil` to drop the image and keep only its description.
+
+```lua
+markdownify.convert(html, {
+    imageHandler = function(src, alt)
+        return download(src) -- e.g. save a copy and link to that
+    end,
+})
+```
+
+## Links within the page
+
+Browsers copy links to sections of the page (`href="#History"`) as absolute
+links (`https://host/page#History`). Pass the page's URL as `source` and
+those whose targets were copied too point into the Markdown instead: links
+to headings become `#history`, and footnotes are kept (below). If only the
+page's site is known (Firefox puts just that on the clipboard), the page is
+taken to be the one there whose links reach the copied HTML, if there's
+exactly one; otherwise links are left as they are. Links to anything that
+wasn't copied stay absolute, so they still work.
+
+Pass an `anchor(line)` function to make anchors your way; it gets the
+heading's Markdown line (`"## History"`), and the default follows GitHub.
+
+## Footnotes
+
+A `<sup>` holding just a link, like Wikipedia's citations, becomes a
+footnote reference, labelled with the link's text (`[7]` → `[^7]`). If what
+it links to was copied, that is the footnote (and isn't repeated where it
+was); otherwise the footnote is the link, so it can still be followed.
+
 ## Testing
 
 ```bash
