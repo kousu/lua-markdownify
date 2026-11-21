@@ -196,6 +196,64 @@ describe("markdownify.convert()", function()
 		end)
 	end)
 
+	describe("invisible characters", function()
+		it("strips soft hyphens, zero-width spaces, word joiners and byte order marks", function()
+			assert.are.equal(
+				"invited software",
+				md("<p>in\194\173vited so\226\128\139ft\226\129\160wa\239\187\191re</p>")
+			)
+			assert.are.equal("invited", md("<p>in&shy;vited</p>"))
+		end)
+
+		it("strips control characters but keeps whitespace between words", function()
+			assert.are.equal("abc d e", md("<p>a\1b\27c\127\194\133 d\12e</p>"))
+		end)
+
+		it("strips bidi embeddings and overrides", function()
+			assert.are.equal("abcde", md("<p>a\226\128\170b\226\128\171c\226\128\172d\226\128\173\226\128\174e</p>"))
+		end)
+
+		it("turns non-breaking hyphens into plain ones", function()
+			assert.are.equal("case-by-case", md("<p>case\226\128\145by\226\128\145case</p>"))
+		end)
+
+		it("escapes a list marker made by normalizing a hyphen", function()
+			assert.are.equal("\\- item", md("<p>\226\128\145 item</p>"))
+		end)
+
+		it("keeps characters that text needs", function()
+			for _, s in ipairs({
+				"\240\159\145\169\226\128\141\240\159\146\187", -- ZWJ emoji
+				"\217\133\219\140\226\128\140\216\177", -- ZWNJ in Persian
+				"\226\157\164\239\184\143", -- variation selector
+				"\240\159\143\180\243\160\129\167\243\160\129\162\243\160\129\165\243\160\129\174\243\160\129\167\243\160\129\191", -- England's flag
+				"a\226\128\142b\226\128\143c", -- LRM, RLM
+				"a\226\129\166b\226\129\169c", -- bidi isolate
+				"caf\195\169 \226\128\156q\226\128\157 \226\128\148", -- ordinary non-ASCII
+			}) do
+				assert.are.equal(s, md("<p>" .. s .. "</p>"))
+			end
+		end)
+
+		it("cleans image descriptions and link titles", function()
+			assert.are.equal("![in-vited](a.png)", md('<img alt="in\194\173\226\128\145vited" src="a.png">'))
+			assert.are.equal("[invited](https://x.org)", md('<a href="https://x.org" title="in\194\173vited"></a>'))
+		end)
+
+		it("leaves code exactly as it was", function()
+			assert.are.equal("`a\194\173b`", md("<code>a\194\173b</code>"))
+			assert.are.equal("```\na\226\128\145b\226\128\139c\n```", md("<pre>a\226\128\145b\226\128\139c</pre>"))
+		end)
+
+		it("leaves URLs alone", function()
+			assert.are.equal("[a](https://x.org/b\194\173c)", md('<a href="https://x.org/b\194\173c">a</a>'))
+		end)
+
+		it("keeps hard line breaks", function()
+			assert.are.equal("a\\\nb", md("<p>a\194\173<br>b</p>"))
+		end)
+	end)
+
 	it("returns an empty string for empty input", function()
 		assert.are.equal("", md(""))
 	end)

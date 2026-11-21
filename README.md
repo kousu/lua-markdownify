@@ -34,6 +34,14 @@ Text that Markdown would read as formatting is escaped. When the HTML has
 the `<!--StartFragment-->`/`<!--EndFragment-->` markers browsers put on
 the clipboard, only the part between them is converted.
 
+Outside code, invisible characters that only affect layout or could disguise
+the text are removed, so the Markdown can be searched: soft hyphens, zero-width
+spaces, word joiners, byte order marks, control characters, and bidi embeddings
+and overrides. Non-breaking hyphens become plain hyphens. Characters that some
+text needs are kept: ZWJ, ZWNJ, variation selectors, tag characters, LRM, RLM
+and bidi isolates. Tag characters are invisible, so they can hide text from a
+reader that other tools, such as LLMs, will still see.
+
 ## Images
 
 You can pass an `imageHandler(src, alt)` to do something special with their

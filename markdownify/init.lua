@@ -74,6 +74,38 @@ local BREAK = "\0"
 
 -- ── Text ────────────────────────────────────────────────────────────────────
 
+-- Remove invisible characters that only affect layout or could disguise the
+-- text, so that the Markdown can be searched and edited; a document can be
+-- hyphenated again when it's next typeset. Removes C0 controls (except
+-- whitespace), DEL, C1 controls, soft hyphens, zero-width spaces, word joiners,
+-- byte order marks, and bidi embeddings and overrides. Turns non-breaking
+-- hyphens into plain ones.
+--
+-- Keeps what some text needs: ZWJ and ZWNJ (emoji, Persian, Indic scripts),
+-- variation selectors, tag characters (subdivision flags), and LRM, RLM and
+-- bidi isolates (mixed left-to-right and right-to-left text).
+local function clean_text(s)
+	-- most text has none of these bytes: checking first saves pattern
+	-- searches, which are slow in some Lua implementations (micro's gopher-lua)
+	if not s:find("[%z\1-\8\11\14-\31\127\194\226\239]") then
+		return s
+	end
+	s = s:gsub("[%z\1-\8\11\14-\31\127]", "")
+	if s:find("\194", 1, true) then
+		s = s:gsub("\194[\128-\159\173]", "") -- C1 controls, soft hyphen
+	end
+	if s:find("\226", 1, true) then
+		s = s
+			:gsub("\226\128[\139\170-\174]", "") -- zero-width space, bidi embeddings and overrides
+			:gsub("\226\129\160", "") -- word joiner
+			:gsub("\226\128\145", "-") -- non-breaking hyphen
+	end
+	if s:find("\239\187\191", 1, true) then
+		s = s:gsub("\239\187\191", "") -- byte order mark
+	end
+	return s
+end
+
 -- Escape characters that Markdown would otherwise read as formatting.
 local function escape_inline(s)
 	return (s:gsub("([\\`*_%[%]])", "\\%1"))
@@ -260,7 +292,7 @@ end
 render_inline = function(node, opts)
 	local tag = node.tag
 	if tag == "#text" then
-		return escape_inline(node.text_content)
+		return escape_inline(clean_text(node.text_content))
 	elseif not node:is_element() or SKIP[tag] then
 		return ""
 	elseif tag == "br" then
@@ -298,13 +330,13 @@ render_inline = function(node, opts)
 			if not title or not title:find("%S") then
 				return ""
 			end
-			text = escape_inline(title)
+			text = escape_inline(clean_text(title))
 		elseif core == escape_inline(href) then
 			return "<" .. href .. ">"
 		end
 		return "[" .. text .. "](" .. link_destination(anchor or href) .. ")"
 	elseif tag == "img" then
-		local alt = node.attrs.alt or ""
+		local alt = clean_text(node.attrs.alt or "")
 		local src = node.attrs.src or ""
 		if opts.imageHandler then
 			src = opts.imageHandler(src, alt)
