@@ -44,13 +44,14 @@ reader that other tools, such as LLMs, will still see.
 
 ## Images
 
-You can pass an `imageHandler(src, alt)` to do something special with their
-links. It's called for each image, and should return the src to link to instead,
-or `nil` to drop the image and keep only its description.
+You can pass an `imageHandler(src, alt, title)` to do something special with
+their links. It's called for each image with plain text, and returns `src, alt,
+title`. A `nil` src drops the image and keeps only its description. A `nil` alt or
+title keeps the original, and `""` removes it.
 
 ```lua
 markdownify.convert(html, {
-    imageHandler = function(src, alt)
+    imageHandler = function(src, alt, title)
         return download(src) -- e.g. save a copy and link to that
     end,
 })

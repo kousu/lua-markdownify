@@ -4,10 +4,11 @@
 -- else, and drop what's only presentation (styles, scripts).
 --
 --   local markdownify = require("markdownify")
---   markdownify.convert(html, { imageHandler = function(src, alt) ... end })
+--   markdownify.convert(html, { imageHandler = function(src, alt, title) ... end })
 --
--- imageHandler, if given, is called for every image and returns the src to
--- link to, or nil to drop the image (leaving its alt text).
+-- imageHandler, if given, is called for every image with its src, alt and
+-- title as plain text, and returns src, alt, title. A nil src drops the image
+-- (leaving its alt text). A nil alt or title keeps the original; "" removes it.
 --
 -- anchor, if given, turns a heading's Markdown line ("## Some heading") into
 -- the anchor that links to it ("some-heading"); it's used to point links to
@@ -109,6 +110,11 @@ end
 -- Escape characters that Markdown would otherwise read as formatting.
 local function escape_inline(s)
 	return (s:gsub("([\\`*_%[%]])", "\\%1"))
+end
+
+-- Escape what would end a Markdown link title in double quotes.
+local function escape_title(s)
+	return (s:gsub('([\\"])', "\\%1"))
 end
 
 -- Escape what would start a block if it began a line: "# ", "> ", "- ",
@@ -337,14 +343,22 @@ render_inline = function(node, opts)
 		return "[" .. text .. "](" .. link_destination(anchor or href) .. ")"
 	elseif tag == "img" then
 		local alt = clean_text(node.attrs.alt or "")
+		local title = clean_text(node.attrs.title or "")
 		local src = node.attrs.src or ""
 		if opts.imageHandler then
-			src = opts.imageHandler(src, alt)
+			local newAlt, newTitle
+			src, newAlt, newTitle = opts.imageHandler(src, alt, title ~= "" and title or nil)
+			alt = newAlt == nil and alt or newAlt
+			title = newTitle == nil and title or newTitle
 		end
 		if not src or src == "" then
 			return escape_inline(alt)
 		end
-		return "![" .. escape_inline(alt) .. "](" .. link_destination(src) .. ")"
+		local dest = link_destination(src)
+		if title ~= "" then
+			dest = dest .. ' "' .. escape_title(title) .. '"'
+		end
+		return "![" .. escape_inline(alt) .. "](" .. dest .. ")"
 	elseif tag == "input" then
 		if (node.attrs.type or ""):lower() == "checkbox" then
 			return node.attrs.checked and "[x] " or "[ ] "

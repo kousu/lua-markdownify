@@ -103,6 +103,45 @@ describe("markdownify.convert()", function()
 		assert.are.same({ "a", "b" }, seen)
 	end)
 
+	it("keeps image titles, escaped", function()
+		assert.are.equal(
+			[[![a](b.png "say \"hi\" \\ bye")]],
+			md([[<img src="b.png" alt="a" title="say &quot;hi&quot; \ bye">]])
+		)
+	end)
+
+	it("lets imageHandler see and change the src, alt and title", function()
+		local got
+		local out = md('<img src="b.png" alt="a" title="t">', {
+			imageHandler = function(src, alt, title)
+				got = { src, alt, title }
+				return "./c.png", "new", "other"
+			end,
+		})
+		assert.are.same({ "b.png", "a", "t" }, got)
+		assert.are.equal('![new](./c.png "other")', out)
+	end)
+
+	it("keeps alt and title when imageHandler returns nil for them, and removes them for an empty string", function()
+		local html = '<img src="b.png" alt="a" title="t">'
+		assert.are.equal(
+			'![a](./c.png "t")',
+			md(html, {
+				imageHandler = function()
+					return "./c.png"
+				end,
+			})
+		)
+		assert.are.equal(
+			"![](./c.png)",
+			md(html, {
+				imageHandler = function()
+					return "./c.png", "", ""
+				end,
+			})
+		)
+	end)
+
 	it("drops scripts and javascript: links", function()
 		assert.are.equal("go", md('<script>alert(1)</script><a href="javascript:alert(1)">go</a>'))
 	end)
