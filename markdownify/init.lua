@@ -107,8 +107,29 @@ local function clean_text(s)
 	return s
 end
 
+-- Plain searches are fast everywhere; pattern searches and gsub() are slow
+-- in some Lua implementations (micro's gopher-lua copies the string and
+-- recompiles the pattern on every call, then runs it at every position), so
+-- these check with plain searches whether a pattern is needed at all.
+local find, byte = string.find, string.byte
+
+-- Does `s` contain any of the strings in `list`?
+local function has_any(s, list)
+	for i = 1, #list do
+		if find(s, list[i], 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local MARKDOWN_SPECIALS = { "\\", "`", "*", "_", "[", "]" }
+
 -- Escape characters that Markdown would otherwise read as formatting.
 local function escape_inline(s)
+	if not has_any(s, MARKDOWN_SPECIALS) then
+		return s
+	end
 	return (s:gsub("([\\`*_%[%]])", "\\%1"))
 end
 
@@ -126,8 +147,31 @@ local function escape_line_start(line)
 	if not (b == 35 or b == 62 or b == 45 or b == 43 or (b and b >= 48 and b <= 57)) then -- # > - + 0-9
 		return line
 	end
-	if line:find("^#+ ") or line:find("^#+$") or line:find("^>") or line:find("^[-+] ") or line:find("^[-+]$") then
+	if b == 62 then -- >
 		return "\\" .. line
+	elseif b == 35 then -- #
+		if line:find("^#+ ") or line:find("^#+$") then
+			return "\\" .. line
+		end
+		return line
+	elseif b == 45 or b == 43 then -- - +
+		local b2 = line:byte(2)
+		if b2 == 32 or b2 == nil then
+			return "\\" .. line
+		end
+		return line
+	end
+	-- a digit: only a run of digits then . or ) can start a list
+	local d = 2
+	while true do
+		local x = line:byte(d)
+		if x == nil or x < 48 or x > 57 then
+			if x ~= 46 and x ~= 41 then
+				return line
+			end
+			break
+		end
+		d = d + 1
 	end
 	local digits, rest = line:match("^(%d+)([.)].*)$")
 	if digits and (rest:find("^[.)] ") or #rest == 1) then
@@ -138,11 +182,78 @@ end
 
 -- Tidy a paragraph's text: collapse whitespace, turn break markers into
 -- Markdown hard breaks, and trim.
+local SPACE_RUNS = { "\t", "\n", "\r", "\f", "  " }
+
+-- `s` without leading and trailing spaces.
+local function trim_spaces(s)
+	local i, j = 1, #s
+	while byte(s, i) == 32 do
+		i = i + 1
+	end
+	while j >= i and byte(s, j) == 32 do
+		j = j - 1
+	end
+	if i == 1 and j == #s then
+		return s
+	end
+	return s:sub(i, j)
+end
+
+local function is_space_byte(b)
+	return b == 32 or b == 10 or b == 9 or b == 13 or b == 12
+end
+
+-- `s` with each run of whitespace turned into a single space. Plain
+-- searches for where runs start, so the work is per run, not per byte.
+local function collapse_spaces(s)
+	local next_at = {}
+	local out, pos = {}, 1
+	while true do
+		local at
+		for i = 1, #SPACE_RUNS do
+			local c = SPACE_RUNS[i]
+			local a = next_at[c]
+			if a == nil or (a and a < pos) then
+				a = find(s, c, pos, true) or false
+				next_at[c] = a
+			end
+			if a and (not at or a < at) then
+				at = a
+			end
+		end
+		if not at then
+			break
+		end
+		local start, e = at, at
+		while start > pos and byte(s, start - 1) == 32 do
+			start = start - 1
+		end
+		while is_space_byte(byte(s, e + 1)) do
+			e = e + 1
+		end
+		out[#out + 1] = s:sub(pos, start - 1)
+		out[#out + 1] = " "
+		pos = e + 1
+	end
+	if pos == 1 then
+		return s
+	end
+	out[#out + 1] = s:sub(pos)
+	return concat(out)
+end
+
 local function finish_paragraph(s)
-	s = s:gsub(NBSP, " "):gsub("[ \t\n\r\f]+", " ")
+	if find(s, NBSP, 1, true) then
+		s = s:gsub(NBSP, " ")
+	end
+	s = collapse_spaces(s)
 	local lines = {}
-	for line in (s .. BREAK):gmatch("(.-)%z") do
-		lines[#lines + 1] = escape_line_start(line:match("^ *(.-) *$"))
+	if find(s, BREAK, 1, true) then
+		for line in (s .. BREAK):gmatch("(.-)%z") do
+			lines[#lines + 1] = escape_line_start(trim_spaces(line))
+		end
+	else
+		lines[1] = escape_line_start(trim_spaces(s))
 	end
 	-- drop empty lines from breaks at the start or end
 	while #lines > 0 and lines[#lines] == "" do
@@ -182,11 +293,18 @@ end
 -- Wrap text in a Markdown delimiter (**, *, ~~), keeping leading and
 -- trailing spaces outside it, where Markdown needs them.
 local function wrap(delimiter, s)
-	local lead, core, trail = s:match("^([ %z]*)(.-)([ %z]*)$")
-	if core == "" then
+	-- spaces and break markers (NULs) stay outside
+	local i, j = 1, #s
+	while byte(s, i) == 32 or byte(s, i) == 0 do
+		i = i + 1
+	end
+	if i > j then
 		return s
 	end
-	return lead .. delimiter .. core .. delimiter .. trail
+	while byte(s, j) == 32 or byte(s, j) == 0 do
+		j = j - 1
+	end
+	return s:sub(1, i - 1) .. delimiter .. s:sub(i, j) .. delimiter .. s:sub(j + 1)
 end
 
 -- What an element's inline style says about weight, slant and strike-through.
@@ -453,8 +571,14 @@ local function render_table(node, opts)
 		local cells = {}
 		for _, cell in ipairs(tr.children) do
 			if cell.tag == "td" or cell.tag == "th" then
-				local text = finish_paragraph(inline_children(cell, opts)):gsub("\\\n", " ")
-				cells[#cells + 1] = text:gsub("|", "\\|")
+				local text = finish_paragraph(inline_children(cell, opts))
+				if find(text, "\\\n", 1, true) then
+					text = text:gsub("\\\n", " ")
+				end
+				if find(text, "|", 1, true) then
+					text = text:gsub("|", "\\|")
+				end
+				cells[#cells + 1] = text
 			end
 		end
 		if #cells > 0 then
